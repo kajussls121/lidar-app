@@ -1,3 +1,38 @@
 <resources>
     <string name="app_name">Lidar Measure</string>
+
+    <string name="status_initializing">Starting AR…</string>
+    <string name="status_searching">Move your phone slowly to find a surface</string>
+    <string name="status_aim_surface">Aim the reticle at a surface</string>
+    <string name="status_first_point">Tap a surface to place the first point</string>
+    <string name="status_next_point">Tap to place the next point</string>
+    <string name="readout_placeholder">—</string>
+
+    <string name="button_add_point">Add point</string>
+    <string name="button_undo">Undo</string>
+    <string name="button_clear">Clear</string>
+    <string name="button_grant">Allow camera</string>
+    <string name="button_retry">Retry</string>
+
+    <string name="unit_metric">Metres</string>
+    <string name="unit_imperial">Feet</string>
+    <string name="total_label">Total %1$s</string>
+    <string name="segments_label">%1$d segments</string>
+
+    <string name="hint_no_surface">Nothing to measure there — aim at a surface</string>
+    <string name="hint_point_limit">Point limit reached — undo or clear to continue</string>
+
+    <string name="camera_title">Camera permission needed</string>
+    <string name="camera_body">Measuring with AR needs the camera. Nothing is recorded or uploaded.</string>
+    <string name="camera_unavailable_title">Camera unavailable</string>
+    <string name="camera_unavailable_body">Another app is probably using the camera. Close it and try again.</string>
+
+    <string name="ar_install_title">Install Google Play Services for AR</string>
+    <string name="ar_install_body">Measuring needs ARCore. Finish the install from the Play Store, then come back.</string>
+
+    <string name="ar_unsupported_title">AR isn\'t available</string>
+    <string name="ar_unsupported_body">This device does not support ARCore, which this app needs to measure. Google Play Services for AR must be installed and the device must be on the supported list.</string>
+
+    <string name="ar_error_title">Something went wrong</string>
+    <string name="ar_error_body">The AR session could not start. Try again, or reopen the app.</string>
 </resources>
