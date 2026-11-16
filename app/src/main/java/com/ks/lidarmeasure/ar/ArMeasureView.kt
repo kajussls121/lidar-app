@@ -2,6 +2,8 @@ package com.ks.lidarmeasure.ar
 
 import android.app.Activity
 import android.content.Context
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.os.Build
@@ -14,6 +16,7 @@ import com.google.ar.core.DepthPoint
 import com.google.ar.core.Frame
 import com.google.ar.core.HitResult
 import com.google.ar.core.InstantPlacementPoint
+import com.google.ar.core.LightEstimate
 import com.google.ar.core.Plane
 import com.google.ar.core.Point
 import com.google.ar.core.Session
@@ -44,6 +47,7 @@ class ArMeasureView @JvmOverloads constructor(
         fun onStatusChanged(status: ArStatus)
         fun onPointsChanged(points: List<ArPoint>)
         fun onHint(hintRes: Int)
+        fun onCameraStateChanged(settings: ArCameraSettings, flashAvailable: Boolean)
     }
 
     var listener: Listener? = null
@@ -52,6 +56,12 @@ class ArMeasureView @JvmOverloads constructor(
     private var session: Session? = null
     private var arStarted = false
     private var installRequested = false
+
+    @Volatile
+    private var cameraSettings = ArCameraSettings()
+
+    @Volatile
+    private var flashAvailable = false
 
     @Volatile
     private var currentStatus = ArStatus.INITIALIZING
@@ -111,6 +121,12 @@ class ArMeasureView @JvmOverloads constructor(
         arStarted = true
         onResume()
         queueEvent { bindSessionOnGlThread() }
+        flashAvailable = queryFlashAvailable(activeSession)
+        if (cameraSettings.torchOn && flashAvailable) {
+            // Restore the torch after a pause; the config above was built before the camera was up.
+            queueEvent { applyConfigOnGlThread() }
+        }
+        notifyCameraState()
         updateStatus(ArStatus.SEARCHING)
     }
 
@@ -123,6 +139,14 @@ class ArMeasureView @JvmOverloads constructor(
         } catch (t: Throwable) {
             // Session already paused or lost; nothing to recover here.
         }
+    }
+
+    /** Applies focus/torch changes to the running session. */
+    fun updateCameraSettings(newSettings: ArCameraSettings) {
+        if (cameraSettings == newSettings) return
+        cameraSettings = newSettings
+        queueEvent { applyConfigOnGlThread() }
+        notifyCameraState()
     }
 
     /** Releases the session; the next [resumeAr] starts from scratch. */
@@ -213,21 +237,54 @@ class ArMeasureView @JvmOverloads constructor(
     }
 
     private fun configure(activeSession: Session) {
+        applyConfig(activeSession, cameraSettings)
+    }
+
+    private fun applyConfig(activeSession: Session, settings: ArCameraSettings) {
+        val config = buildConfig(activeSession, settings)
+        depthEnabled = config.depthMode == Config.DepthMode.AUTOMATIC
+        runCatching { activeSession.configure(config) }
+            .onFailure { updateStatus(ArStatus.ERROR) }
+    }
+
+    // Called on the GL thread.
+    private fun applyConfigOnGlThread() {
+        val activeSession = session ?: return
+        applyConfig(activeSession, cameraSettings)
+    }
+
+    private fun buildConfig(activeSession: Session, settings: ArCameraSettings): Config {
         val depthSupported = runCatching {
             activeSession.isDepthModeSupported(Config.DepthMode.AUTOMATIC)
         }.getOrDefault(false)
 
-        val config = Config(activeSession).apply {
+        return Config(activeSession).apply {
             updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
-            focusMode = Config.FocusMode.AUTO
+            focusMode = when (settings.focus) {
+                ArFocusMode.AUTO -> Config.FocusMode.AUTO
+                ArFocusMode.FIXED -> Config.FocusMode.FIXED
+            }
             planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
-            lightEstimationMode = Config.LightEstimationMode.DISABLED
+            lightEstimationMode = Config.LightEstimationMode.AMBIENT_INTENSITY
             instantPlacementMode = Config.InstantPlacementMode.DISABLED
             depthMode = if (depthSupported) Config.DepthMode.AUTOMATIC else Config.DepthMode.DISABLED
+            if (flashAvailable) {
+                flashMode = if (settings.torchOn) Config.FlashMode.TORCH else Config.FlashMode.OFF
+            }
         }
-        depthEnabled = config.depthMode == Config.DepthMode.AUTOMATIC
-        runCatching { activeSession.configure(config) }
-            .onFailure { updateStatus(ArStatus.ERROR) }
+    }
+
+    private fun queryFlashAvailable(activeSession: Session): Boolean = runCatching {
+        val cameraManager = context.getSystemService(CameraManager::class.java) ?: return@runCatching false
+        val cameraId = activeSession.cameraConfig.cameraId
+        cameraManager.getCameraCharacteristics(cameraId)
+            .get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
+    }.getOrDefault(false)
+
+    private fun notifyCameraState() {
+        val settings = cameraSettings
+        val hasFlash = flashAvailable
+        post { listener?.onCameraStateChanged(settings, hasFlash) }
     }
 
     // Called on the GL thread.
@@ -237,6 +294,7 @@ class ArMeasureView @JvmOverloads constructor(
             runCatching { activeSession.setCameraTextureName(backgroundRenderer.textureId) }
         }
         geometryDirty = true
+        applyConfig(activeSession, cameraSettings)
     }
 
     @Suppress("DEPRECATION")
@@ -409,6 +467,11 @@ class ArMeasureView @JvmOverloads constructor(
             ArPoint(translation[0], translation[1], translation[2])
         }
 
+        val lightEstimate = runCatching { frame.lightEstimate }.getOrNull()
+        val ambientIntensity = lightEstimate
+            ?.takeIf { it.state == LightEstimate.State.VALID }
+            ?.pixelIntensity
+
         publishFrame(
             ArFrameInfo(
                 viewMatrix = viewMatrix,
@@ -420,6 +483,7 @@ class ArMeasureView @JvmOverloads constructor(
                 reticleHit = reticleHit,
                 depthEnabled = depthEnabled,
                 timestampNanos = frame.timestamp,
+                ambientIntensity = ambientIntensity,
             ),
         )
         publishPoints(points)

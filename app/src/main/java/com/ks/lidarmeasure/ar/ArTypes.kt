@@ -13,6 +13,17 @@ enum class ArStatus {
     ERROR,
 }
 
+/**
+ * Camera settings ARCore actually exposes. Exposure and ISO stay under ARCore's control;
+ * adding light (the torch) is the only way to brighten what the tracker sees.
+ */
+enum class ArFocusMode { AUTO, FIXED }
+
+data class ArCameraSettings(
+    val torchOn: Boolean = false,
+    val focus: ArFocusMode = ArFocusMode.AUTO,
+)
+
 /** A point in ARCore world space, in metres. */
 data class ArPoint(
     val x: Float,
@@ -44,6 +55,8 @@ class ArFrameInfo(
     val reticleHit: ArPoint?,
     val depthEnabled: Boolean,
     val timestampNanos: Long,
+    /** Average ambient light, 0 (dark) to 1 (bright); null when ARCore has no estimate yet. */
+    val ambientIntensity: Float?,
 )
 
 object ArMath {

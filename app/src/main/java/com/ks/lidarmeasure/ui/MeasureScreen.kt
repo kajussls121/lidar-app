@@ -22,12 +22,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -65,6 +70,8 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.ks.lidarmeasure.R
+import com.ks.lidarmeasure.ar.ArCameraSettings
+import com.ks.lidarmeasure.ar.ArFocusMode
 import com.ks.lidarmeasure.ar.ArFrameInfo
 import com.ks.lidarmeasure.ar.ArMath
 import com.ks.lidarmeasure.ar.ArMeasureView
@@ -85,6 +92,10 @@ class MeasureUiState {
     var hintRes by mutableStateOf<Int?>(null)
     var hintTick by mutableIntStateOf(0)
     var hasSurface by mutableStateOf(false)
+    var cameraSettings by mutableStateOf(ArCameraSettings())
+    var flashAvailable by mutableStateOf(false)
+    var lowLight by mutableStateOf(false)
+    var showSettings by mutableStateOf(false)
 }
 
 @Composable
@@ -133,6 +144,12 @@ fun MeasureScreen(modifier: Modifier = Modifier) {
         if (cameraGranted) activity?.let { arView?.resumeAr(it) }
     }
 
+    // The AR view owns the settings; mirror them locally first so the toggle reacts instantly.
+    val applySettings: (ArCameraSettings) -> Unit = { newSettings ->
+        state.cameraSettings = newSettings
+        arView?.updateCameraSettings(newSettings)
+    }
+
     Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
         if (cameraGranted) {
             AndroidView(
@@ -141,9 +158,11 @@ fun MeasureScreen(modifier: Modifier = Modifier) {
                         view.listener = object : ArMeasureView.Listener {
                             override fun onFrame(frame: ArFrameInfo) {
                                 state.frame = frame
-                                if (state.hasSurface != (frame.reticleHit != null)) {
-                                    state.hasSurface = frame.reticleHit != null
-                                }
+                                val hasSurface = frame.reticleHit != null
+                                if (state.hasSurface != hasSurface) state.hasSurface = hasSurface
+                                val lowLight = frame.ambientIntensity
+                                    ?.let { it < LOW_LIGHT_INTENSITY } == true
+                                if (state.lowLight != lowLight) state.lowLight = lowLight
                             }
 
                             override fun onStatusChanged(status: ArStatus) {
@@ -158,6 +177,14 @@ fun MeasureScreen(modifier: Modifier = Modifier) {
                                 state.hintRes = hintRes
                                 state.hintTick += 1
                             }
+
+                            override fun onCameraStateChanged(
+                                settings: ArCameraSettings,
+                                flashAvailable: Boolean,
+                            ) {
+                                state.cameraSettings = settings
+                                state.flashAvailable = flashAvailable
+                            }
                         }
                         arView = view
                     }
@@ -169,6 +196,33 @@ fun MeasureScreen(modifier: Modifier = Modifier) {
                 state = state,
                 onTap = { x, y -> arView?.addPointAt(x, y) },
             )
+
+            Column(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .padding(horizontal = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalAlignment = Alignment.End,
+            ) {
+                if (state.flashAvailable) {
+                    val torchOn = state.cameraSettings.torchOn
+                    FilledTonalButton(
+                        onClick = {
+                            applySettings(state.cameraSettings.copy(torchOn = !torchOn))
+                        },
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = if (torchOn) AccentColor else Color(0xE62A2A2A),
+                            contentColor = if (torchOn) Color.Black else Color.White,
+                        ),
+                    ) {
+                        Text(stringResource(if (torchOn) R.string.light_on else R.string.light_off))
+                    }
+                }
+                OutlinedButton(onClick = { state.showSettings = true }) {
+                    Text(stringResource(R.string.button_settings))
+                }
+            }
         }
 
         StatusPill(
@@ -199,6 +253,15 @@ fun MeasureScreen(modifier: Modifier = Modifier) {
             )
         }
 
+        if (state.showSettings) {
+            CameraSettingsDialog(
+                settings = state.cameraSettings,
+                flashAvailable = state.flashAvailable,
+                onSettingsChange = applySettings,
+                onDismiss = { state.showSettings = false },
+            )
+        }
+
         BlockingMessage(state = state, cameraGranted = cameraGranted) { action ->
             when (action) {
                 BlockingAction.GRANT_CAMERA -> permissionLauncher.launch(Manifest.permission.CAMERA)
@@ -215,6 +278,10 @@ private fun StatusPill(state: MeasureUiState, modifier: Modifier = Modifier) {
     val hint = state.hintRes
     val text = when {
         hint != null -> stringResource(hint)
+        state.status == ArStatus.TRACKING && state.lowLight &&
+            !state.cameraSettings.torchOn && state.points.isEmpty() ->
+            stringResource(R.string.status_low_light)
+
         state.status == ArStatus.TRACKING && !state.hasSurface -> stringResource(R.string.status_aim_surface)
         state.status == ArStatus.TRACKING && state.points.isEmpty() -> stringResource(R.string.status_first_point)
         state.status == ArStatus.TRACKING -> stringResource(R.string.status_next_point)
@@ -535,6 +602,75 @@ private fun MeasureOverlay(state: MeasureUiState, onTap: (Float, Float) -> Unit)
 
 private fun Context.hasCameraPermission(): Boolean =
     ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
+/** Comfortably dark: ARCore will struggle to track even with the depth assist. */
+private const val LOW_LIGHT_INTENSITY = 0.15f
+
+@Composable
+private fun CameraSettingsDialog(
+    settings: ArCameraSettings,
+    flashAvailable: Boolean,
+    onSettingsChange: (ArCameraSettings) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.settings_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = stringResource(R.string.settings_torch),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Switch(
+                        checked = settings.torchOn,
+                        onCheckedChange = { onSettingsChange(settings.copy(torchOn = it)) },
+                        enabled = flashAvailable,
+                    )
+                }
+                if (!flashAvailable) {
+                    Text(
+                        text = stringResource(R.string.settings_torch_unavailable),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+
+                Text(
+                    text = stringResource(R.string.settings_focus_label),
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = settings.focus == ArFocusMode.AUTO,
+                        onClick = { onSettingsChange(settings.copy(focus = ArFocusMode.AUTO)) },
+                        label = { Text(stringResource(R.string.focus_auto)) },
+                    )
+                    FilterChip(
+                        selected = settings.focus == ArFocusMode.FIXED,
+                        onClick = { onSettingsChange(settings.copy(focus = ArFocusMode.FIXED)) },
+                        label = { Text(stringResource(R.string.focus_fixed)) },
+                    )
+                }
+                Text(
+                    text = stringResource(R.string.settings_focus_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = stringResource(R.string.settings_exposure_note),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.button_done)) }
+        },
+    )
+}
 
 private fun Context.findComponentActivity(): ComponentActivity? {
     var current: Context = this
